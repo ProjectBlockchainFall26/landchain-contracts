@@ -1,0 +1,7 @@
+node_modules/
+build/
+.env.local
+.ganache-db/
+shared/deployments.local.json
+.DS_Store
+
