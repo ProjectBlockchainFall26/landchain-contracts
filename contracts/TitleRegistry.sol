@@ -7,13 +7,19 @@ import {LandAccessControl} from "./LandAccessControl.sol";
 import {LandRoleGuard} from "./base/LandRoleGuard.sol";
 import {IdentityRegistry} from "./IdentityRegistry.sol";
 
+/// @notice What TitleRegistry needs to know from the FeeLedger: has the registrar recorded the receipts?
+interface IFeeLedger {
+    function isPaid(uint256 recordId, uint8 kind) external view returns (bool);
+    function transferFeePaid(uint256 transferId) external view returns (bool);
+}
+
 /// @title TitleRegistry
-/// @notice Every parcel is a record linked to its GPS boundary. A record becomes an ERC-721 land title only
-///         after the surveyor, the lawyer and the registrar have each signed off, in that order.
-/// @dev Records and titles are separate: a pending application has a record id but no token. The token id
-///      (and title number) is assigned when the registrar finalises.
-///      Titles cannot be moved with transferFrom; only agent contracts (Marketplace, DisputeResolution)
-///      can change a title's status or owner, so every ownership change passes the registrar or a judge.
+/// @notice The land register. A verified owner applies to register a parcel (with its GPS boundary and
+///         document hashes); the Lands Commission registrar approves it and an ERC-721 title is minted
+///         to the owner. After that the record cannot be edited, and ownership changes only when the
+///         owner requests a transfer AND the registrar approves it. Neither side can move a title alone.
+/// @dev The sale itself happens off chain (indenture, lawyer, family or stool). This contract records
+///      the result. A pending application has a record id but no token; the token is minted on approval.
 contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     enum Interest {
         Allodial,
@@ -23,25 +29,24 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     }
 
     enum Status {
-        Pending,
-        Verified, // titled, not listed
-        ForSale,
-        InEscrow,
-        Sold, // titled, last changed hands through a sale
-        Frozen,
-        Rejected
+        Pending, // applied, waiting for the registrar
+        Registered, // title minted
+        TransferPending, // owner asked to transfer, waiting for the registrar
+        Rejected // application refused; the parcel id and boundary are free again
     }
 
-    enum StepStatus {
+    enum Decision {
         Waiting,
         Approved,
-        Rejected
+        Rejected,
+        Cancelled
     }
 
+    /// @dev Only the type and the fingerprint go on chain. The file (and its name, which may contain a person's
+    ///      name) is held off chain by the Lands Commission, because everything in a contract is publicly readable.
     struct Doc {
-        string docType; // Indenture, Site plan, Search report
-        string name;
-        bytes32 hash; // SHA-256 of the file; the file itself lives off chain
+        string docType; // Site plan, Indenture, Search report, Stool/family consent
+        bytes32 hash; // SHA-256 of the file
     }
 
     struct Parcel {
@@ -50,27 +55,35 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         string holder; // allodial holder: stool, skin or family
         string region;
         string location;
+        string planNumber; // regional / plan number from the approved site plan, e.g. SGE B4110/25
+        string gpsAddress; // GhanaPostGPS digital address, e.g. EV-1715-0564
         uint32 acresX100; // area in hundredths of an acre (Solidity has no decimals)
         Status status;
         address owner;
-        uint256 tokenId; // 0 until minted
+        uint256 tokenId; // 0 until the registrar approves
+        uint64 registeredAt;
         uint64 updatedAt;
-    }
-
-    struct Step {
-        StepStatus status;
-        address by;
-        uint64 at;
-        string reason;
     }
 
     struct Application {
         uint256 recordId;
         address applicant;
         uint64 createdAt;
-        Step survey;
-        Step legal;
-        Step registrar;
+        Decision decision;
+        address decidedBy;
+        uint64 decidedAt;
+        string reason; // why it was rejected
+    }
+
+    struct TransferRequest {
+        uint256 recordId;
+        address from;
+        address to;
+        uint64 requestedAt;
+        Decision decision;
+        address decidedBy;
+        uint64 decidedAt;
+        string reason;
     }
 
     struct ApplicationInput {
@@ -79,6 +92,8 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         string holder;
         string region;
         string location;
+        string planNumber;
+        string gpsAddress;
         uint32 acresX100;
         int32[] lats; // micro-degrees: 5.603717 -> 5603717
         int32[] lngs;
@@ -92,25 +107,35 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     int32 public constant MAX_LNG = 1_300_000;
 
     IdentityRegistry public immutable identity;
+    IFeeLedger public feeLedger; // set once by the admin after both contracts are deployed
+
+    // FeeLedger kinds this contract checks (must match FeeLedger.Kind).
+    uint8 private constant FEE_STAMP_DUTY = 1;
+    uint8 private constant FEE_FIRST_REGISTRATION = 2;
 
     Parcel[] private _parcels; // record id = index + 1
     mapping(uint256 => int32[]) private _lats;
     mapping(uint256 => int32[]) private _lngs;
     mapping(uint256 => Doc[]) private _docs;
+    mapping(uint256 => address[]) private _owners; // every owner of a record, oldest first
     mapping(bytes32 => uint256) private _recordOfId; // keccak(parcelId) -> active record id
     mapping(bytes32 => uint256) private _recordOfBoundary; // keccak(lats, lngs) -> active record id
     mapping(uint256 => uint256) public recordOfToken;
+    mapping(uint256 => uint256) public openTransferOf; // record id -> pending transfer id (0 if none)
     Application[] private _apps; // application id = index + 1
+    TransferRequest[] private _transfers; // transfer id = index + 1
     uint256 public titleCount;
 
     event ApplicationSubmitted(
         uint256 indexed appId, uint256 indexed recordId, string parcelId, address indexed applicant, uint256 pillars
     );
-    event StepApproved(uint256 indexed appId, uint256 indexed recordId, uint8 step, address indexed by);
-    event ApplicationRejected(uint256 indexed appId, uint256 indexed recordId, uint8 step, address indexed by, string reason);
+    event ApplicationApproved(uint256 indexed appId, uint256 indexed recordId, address indexed by);
+    event ApplicationRejected(uint256 indexed appId, uint256 indexed recordId, address indexed by, string reason);
     event TitleMinted(uint256 indexed recordId, uint256 indexed tokenId, address indexed owner);
-    event StatusChanged(uint256 indexed recordId, Status status, address indexed by);
-    event TitleTransferred(uint256 indexed recordId, address indexed from, address indexed to);
+    event TransferRequested(uint256 indexed transferId, uint256 indexed recordId, address from, address indexed to);
+    event TransferApproved(uint256 indexed transferId, uint256 indexed recordId, address from, address to, address indexed by);
+    event TransferRejected(uint256 indexed transferId, uint256 indexed recordId, address indexed by, string reason);
+    event TransferCancelled(uint256 indexed transferId, uint256 indexed recordId);
 
     constructor(LandAccessControl acl_, IdentityRegistry identity_)
         ERC721("LandChain Ghana Title", "GLT")
@@ -119,8 +144,18 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         identity = identity_;
     }
 
-    // ---------- registration ----------
+    /// @notice Connects the fee ledger. Once set, approvals require the matching fee receipts.
+    function setFeeLedger(IFeeLedger ledger)
+        external
+        onlyLandRole(acl.DEFAULT_ADMIN_ROLE(), "Only the admin can connect the fee ledger")
+    {
+        require(address(feeLedger) == address(0), "Fee ledger already set");
+        feeLedger = ledger;
+    }
 
+    // ---------- 1. registration ----------
+
+    /// @notice A verified owner applies to register a parcel they already own off chain.
     function submitApplication(ApplicationInput calldata input) external returns (uint256 appId) {
         require(identity.isVerified(msg.sender), "Verify your identity before registering land");
         require(_validParcelId(input.parcelId), "Parcel ID must look like GA-BRK-0015");
@@ -140,6 +175,7 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         require(_recordOfBoundary[boundaryKey] == 0, "This boundary is already registered");
         require(input.acresX100 > 0, "Area must be greater than zero");
         require(bytes(input.holder).length > 0, "Name the allodial holder");
+        require(bytes(input.planNumber).length > 0, "Add the regional plan number from the site plan");
 
         _parcels.push(
             Parcel({
@@ -148,10 +184,13 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
                 holder: input.holder,
                 region: input.region,
                 location: input.location,
+                planNumber: input.planNumber,
+                gpsAddress: input.gpsAddress,
                 acresX100: input.acresX100,
                 status: Status.Pending,
                 owner: msg.sender,
                 tokenId: 0,
+                registeredAt: 0,
                 updatedAt: uint64(block.timestamp)
             })
         );
@@ -172,39 +211,43 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         emit ApplicationSubmitted(appId, recordId, input.parcelId, msg.sender, input.lats.length);
     }
 
-    function approveSurvey(uint256 appId) external {
-        _approve(appId, 0, acl.SURVEYOR_ROLE(), "Only the surveyor can sign this step");
-    }
+    /// @notice Registrar approves: the title NFT is minted to the applicant and the record is locked.
+    function approveApplication(uint256 appId)
+        external
+        onlyLandRole(acl.REGISTRAR_ROLE(), "Only the registrar can approve a registration")
+    {
+        Application storage a = _openApp(appId);
+        if (address(feeLedger) != address(0)) {
+            require(feeLedger.isPaid(a.recordId, FEE_STAMP_DUTY), "Record the stamp duty receipt before approving");
+            require(feeLedger.isPaid(a.recordId, FEE_FIRST_REGISTRATION), "Record the registration fee before approving");
+        }
+        a.decision = Decision.Approved;
+        a.decidedBy = msg.sender;
+        a.decidedAt = uint64(block.timestamp);
 
-    function approveLegal(uint256 appId) external {
-        _approve(appId, 1, acl.LAWYER_ROLE(), "Only the lawyer can sign this step");
-    }
-
-    /// @notice Registrar's final sign-off: mints the title NFT to the applicant.
-    function finalise(uint256 appId) external {
-        Application storage a = _approve(appId, 2, acl.REGISTRAR_ROLE(), "Only the registrar can sign this step");
         Parcel storage p = _parcels[a.recordId - 1];
         uint256 tokenId = ++titleCount;
         p.tokenId = tokenId;
-        p.status = Status.Verified;
+        p.status = Status.Registered;
+        p.registeredAt = uint64(block.timestamp);
         p.updatedAt = uint64(block.timestamp);
         recordOfToken[tokenId] = a.recordId;
+        _owners[a.recordId].push(p.owner);
         _mint(p.owner, tokenId);
+        emit ApplicationApproved(appId, a.recordId, msg.sender);
         emit TitleMinted(a.recordId, tokenId, p.owner);
     }
 
-    /// @param step 0 survey, 1 legal, 2 registrar. Only the role for the current step can reject.
-    function rejectApplication(uint256 appId, uint8 step, string calldata reason) external {
-        Application storage a = _app(appId);
-        require(step <= 2, "Unknown step");
-        require(acl.hasRole(_stepRole(step), msg.sender), _stepRoleError(step));
-        require(currentStep(appId) == step, unicode"Steps must happen in order: survey → legal → registrar");
+    function rejectApplication(uint256 appId, string calldata reason)
+        external
+        onlyLandRole(acl.REGISTRAR_ROLE(), "Only the registrar can reject a registration")
+    {
         require(bytes(reason).length > 0, "A reason is required to reject");
-        Step storage s = _step(a, step);
-        s.status = StepStatus.Rejected;
-        s.by = msg.sender;
-        s.at = uint64(block.timestamp);
-        s.reason = reason;
+        Application storage a = _openApp(appId);
+        a.decision = Decision.Rejected;
+        a.decidedBy = msg.sender;
+        a.decidedAt = uint64(block.timestamp);
+        a.reason = reason;
 
         Parcel storage p = _parcels[a.recordId - 1];
         p.status = Status.Rejected;
@@ -212,33 +255,82 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         // Free the id and the boundary so a corrected application can be made.
         delete _recordOfId[keccak256(bytes(p.parcelId))];
         delete _recordOfBoundary[keccak256(abi.encode(_lats[a.recordId], _lngs[a.recordId]))];
-        emit ApplicationRejected(appId, a.recordId, step, msg.sender, reason);
+        emit ApplicationRejected(appId, a.recordId, msg.sender, reason);
     }
 
-    // ---------- agent-only (Marketplace, DisputeResolution) ----------
+    // ---------- 2. transfer of ownership (sale agreed off chain) ----------
 
-    function setStatus(uint256 recordId, Status status)
-        external
-        onlyLandRole(acl.AGENT_ROLE(), "Only a Lands Commission contract can change a title")
-    {
+    /// @notice The current owner asks the Lands Commission to record a new owner.
+    function requestTransfer(uint256 recordId, address to) external returns (uint256 transferId) {
         Parcel storage p = _record(recordId);
-        require(p.tokenId != 0, "Parcel has no title yet");
-        p.status = status;
+        require(p.owner == msg.sender, "Only the owner can transfer this title");
+        require(p.status == Status.Registered, "Only a registered title with no pending transfer can be transferred");
+        require(to != msg.sender, "You already own this title");
+        require(identity.isVerified(to), "The new owner must have a verified identity");
+
+        _transfers.push(
+            TransferRequest({
+                recordId: recordId,
+                from: msg.sender,
+                to: to,
+                requestedAt: uint64(block.timestamp),
+                decision: Decision.Waiting,
+                decidedBy: address(0),
+                decidedAt: 0,
+                reason: ""
+            })
+        );
+        transferId = _transfers.length;
+        openTransferOf[recordId] = transferId;
+        p.status = Status.TransferPending;
         p.updatedAt = uint64(block.timestamp);
-        emit StatusChanged(recordId, status, msg.sender);
+        emit TransferRequested(transferId, recordId, msg.sender, to);
     }
 
-    function agentTransfer(uint256 recordId, address to)
+    /// @notice Owner withdraws a transfer request before the registrar decides.
+    function cancelTransfer(uint256 transferId) external {
+        TransferRequest storage t = _openTransfer(transferId);
+        require(t.from == msg.sender, "Only the owner who asked can cancel this transfer");
+        t.decision = Decision.Cancelled;
+        t.decidedAt = uint64(block.timestamp);
+        _closeTransfer(t);
+        emit TransferCancelled(transferId, t.recordId);
+    }
+
+    /// @notice Registrar approves: the title NFT moves to the new owner and the owner history grows.
+    function approveTransfer(uint256 transferId)
         external
-        onlyLandRole(acl.AGENT_ROLE(), "Only a Lands Commission contract can move a title")
+        onlyLandRole(acl.REGISTRAR_ROLE(), "Only the registrar can approve a transfer")
     {
-        Parcel storage p = _record(recordId);
-        require(p.tokenId != 0, "Parcel has no title yet");
-        address from = p.owner;
-        _transfer(from, to, p.tokenId);
-        p.owner = to;
-        p.updatedAt = uint64(block.timestamp);
-        emit TitleTransferred(recordId, from, to);
+        TransferRequest storage t = _openTransfer(transferId);
+        require(identity.isVerified(t.to), "The new owner must have a verified identity");
+        if (address(feeLedger) != address(0)) {
+            require(feeLedger.transferFeePaid(transferId), "Record the transfer fee before approving");
+        }
+        t.decision = Decision.Approved;
+        t.decidedBy = msg.sender;
+        t.decidedAt = uint64(block.timestamp);
+
+        Parcel storage p = _parcels[t.recordId - 1];
+        _transfer(t.from, t.to, p.tokenId); // internal: passes the _update guard below
+        p.owner = t.to;
+        _owners[t.recordId].push(t.to);
+        _closeTransfer(t);
+        emit TransferApproved(transferId, t.recordId, t.from, t.to, msg.sender);
+    }
+
+    function rejectTransfer(uint256 transferId, string calldata reason)
+        external
+        onlyLandRole(acl.REGISTRAR_ROLE(), "Only the registrar can reject a transfer")
+    {
+        require(bytes(reason).length > 0, "A reason is required to reject");
+        TransferRequest storage t = _openTransfer(transferId);
+        t.decision = Decision.Rejected;
+        t.decidedBy = msg.sender;
+        t.decidedAt = uint64(block.timestamp);
+        t.reason = reason;
+        _closeTransfer(t);
+        emit TransferRejected(transferId, t.recordId, msg.sender, reason);
     }
 
     // ---------- reads ----------
@@ -261,6 +353,12 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         return _docs[recordId];
     }
 
+    /// @notice Every owner this title has had, oldest first. Empty until the title is minted.
+    function ownerHistory(uint256 recordId) external view returns (address[] memory) {
+        _record(recordId);
+        return _owners[recordId];
+    }
+
     /// @notice Active record for a parcel id (0 if none or if its application was rejected).
     function recordOfParcelId(string calldata parcelId) external view returns (uint256) {
         return _recordOfId[keccak256(bytes(parcelId))];
@@ -274,32 +372,33 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         return _app(appId);
     }
 
-    /// @return 0 survey, 1 legal, 2 registrar, 3 done or rejected (nothing to sign)
-    function currentStep(uint256 appId) public view returns (uint8) {
-        Application storage a = _app(appId);
-        Step[3] memory steps = [a.survey, a.legal, a.registrar];
-        for (uint8 i = 0; i < 3; i++) {
-            if (steps[i].status == StepStatus.Rejected) return 3;
-            if (steps[i].status == StepStatus.Waiting) return i;
-        }
-        return 3;
+    function transferCount() external view returns (uint256) {
+        return _transfers.length;
+    }
+
+    function getTransfer(uint256 transferId) external view returns (TransferRequest memory) {
+        require(transferId > 0 && transferId <= _transfers.length, "Transfer not found");
+        return _transfers[transferId - 1];
     }
 
     // ---------- internals ----------
 
-    function _approve(uint256 appId, uint8 step, bytes32 role, string memory roleError)
-        private
-        returns (Application storage a)
-    {
+    function _openApp(uint256 appId) private view returns (Application storage a) {
         a = _app(appId);
-        require(acl.hasRole(role, msg.sender), roleError);
-        require(currentStep(appId) == step, unicode"Steps must happen in order: survey → legal → registrar");
-        Step storage s = _step(a, step);
-        s.status = StepStatus.Approved;
-        s.by = msg.sender;
-        s.at = uint64(block.timestamp);
-        _parcels[a.recordId - 1].updatedAt = uint64(block.timestamp);
-        emit StepApproved(appId, a.recordId, step, msg.sender);
+        require(a.decision == Decision.Waiting, "This application has already been decided");
+    }
+
+    function _openTransfer(uint256 transferId) private view returns (TransferRequest storage t) {
+        require(transferId > 0 && transferId <= _transfers.length, "Transfer not found");
+        t = _transfers[transferId - 1];
+        require(t.decision == Decision.Waiting, "This transfer has already been decided");
+    }
+
+    function _closeTransfer(TransferRequest storage t) private {
+        Parcel storage p = _parcels[t.recordId - 1];
+        p.status = Status.Registered;
+        p.updatedAt = uint64(block.timestamp);
+        delete openTransferOf[t.recordId];
     }
 
     function _app(uint256 appId) private view returns (Application storage) {
@@ -310,20 +409,6 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     function _record(uint256 recordId) private view returns (Parcel storage) {
         require(recordId > 0 && recordId <= _parcels.length, "Parcel does not exist");
         return _parcels[recordId - 1];
-    }
-
-    function _step(Application storage a, uint8 step) private view returns (Step storage) {
-        return step == 0 ? a.survey : step == 1 ? a.legal : a.registrar;
-    }
-
-    function _stepRole(uint8 step) private view returns (bytes32) {
-        return step == 0 ? acl.SURVEYOR_ROLE() : step == 1 ? acl.LAWYER_ROLE() : acl.REGISTRAR_ROLE();
-    }
-
-    function _stepRoleError(uint8 step) private pure returns (string memory) {
-        return step == 0
-            ? "Only the surveyor can sign this step"
-            : step == 1 ? "Only the lawyer can sign this step" : "Only the registrar can sign this step";
     }
 
     /// @dev AA-AAA-0000: two capitals, dash, three capitals, dash, four digits.
@@ -341,14 +426,14 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
 
     // ---------- ERC-721 overrides ----------
 
-    /// @dev Internal mint and _transfer pass auth = address(0). Public transferFrom / safeTransferFrom pass
-    ///      the caller as auth, so they are refused: titles move only through agentTransfer.
+    /// @dev Internal _mint and _transfer pass auth = address(0). Public transferFrom / safeTransferFrom pass
+    ///      the caller as auth, so they are refused: a title moves only through approveTransfer.
     function _update(address to, uint256 tokenId, address auth)
         internal
         override(ERC721Enumerable)
         returns (address)
     {
-        require(auth == address(0), "Titles move only through a Lands Commission approved sale");
+        require(auth == address(0), "Titles move only through a registrar-approved transfer");
         return super._update(to, tokenId, auth);
     }
 

@@ -1,27 +1,19 @@
 // Deploys a fresh LandChain system for each test file, the same way the migration does.
 const LandAccessControl = artifacts.require("LandAccessControl");
 const IdentityRegistry = artifacts.require("IdentityRegistry");
-const TestCedi = artifacts.require("TestCedi");
 const TitleRegistry = artifacts.require("TitleRegistry");
-const Marketplace = artifacts.require("Marketplace");
-const DisputeResolution = artifacts.require("DisputeResolution");
+const FeeLedger = artifacts.require("FeeLedger");
 
 async function deploySystem(accounts) {
-  const [admin, surveyor, lawyer, idOfficer, judge] = accounts;
-  const acl = await LandAccessControl.new(admin);
+  const [registrar, idOfficer] = accounts;
+  const acl = await LandAccessControl.new(registrar);
   const identity = await IdentityRegistry.new(acl.address);
-  const tghs = await TestCedi.new(acl.address);
   const titles = await TitleRegistry.new(acl.address, identity.address);
-  const market = await Marketplace.new(acl.address, identity.address, titles.address, tghs.address);
-  const disputes = await DisputeResolution.new(acl.address, market.address, titles.address);
-  await acl.grantRole(await acl.AGENT_ROLE(), market.address);
-  await acl.grantRole(await acl.AGENT_ROLE(), disputes.address);
-  await acl.grantRole(await acl.REGISTRAR_ROLE(), admin);
-  await acl.grantRole(await acl.SURVEYOR_ROLE(), surveyor);
-  await acl.grantRole(await acl.LAWYER_ROLE(), lawyer);
+  const fees = await FeeLedger.new(acl.address, titles.address);
+  await titles.setFeeLedger(fees.address, { from: registrar });
+  await acl.grantRole(await acl.REGISTRAR_ROLE(), registrar);
   await acl.grantRole(await acl.ID_OFFICER_ROLE(), idOfficer);
-  await acl.grantRole(await acl.JUDGE_ROLE(), judge);
-  return { acl, identity, tghs, titles, market, disputes, registrar: admin, surveyor, lawyer, idOfficer, judge };
+  return { acl, identity, titles, fees, registrar, idOfficer };
 }
 
 const cardHash = (n) => web3.utils.soliditySha3(`landchain-card:GHA-70000000${n}-${n}`);
@@ -41,18 +33,29 @@ function application(parcelId, offset = 0) {
   const { lats, lngs } = square(offset);
   return {
     parcelId, interest: 1, holder: "Berekuso Stool", region: "Eastern", location: "Berekuso, Eastern Region",
+    planNumber: `SGE B${parcelId.slice(-4)}/26`, gpsAddress: "EV-1715-0564",
     acresX100: 620, lats, lngs,
-    docs: [{ docType: "Indenture", name: `${parcelId}-indenture.pdf`, hash: web3.utils.soliditySha3(parcelId) }],
+    docs: [{ docType: "Indenture", hash: web3.utils.soliditySha3(parcelId) }],
   };
 }
 
-/** Applies, then has surveyor, lawyer and registrar sign. Returns the record id of the new title. */
+const FEE = { OfficialSearch: 0, StampDuty: 1, FirstRegistration: 2, Transfer: 3 };
+let receiptNo = 0;
+/** keccak256 of a fresh official receipt number. */
+const receipt = () => web3.utils.soliditySha3(`LC-RCPT-${++receiptNo}`);
+
+/** The registrar records the stamp duty and registration fee receipts for a parcel. */
+async function payRegistrationFees(sys, recordId) {
+  await sys.fees.recordPayment(recordId, FEE.StampDuty, 60000, receipt(), { from: sys.registrar });
+  await sys.fees.recordPayment(recordId, FEE.FirstRegistration, 117800, receipt(), { from: sys.registrar });
+}
+
+/** Applies, fees recorded, then the registrar approves. Returns the record id of the new title. */
 async function titledParcel(sys, owner, parcelId, offset) {
   await sys.titles.submitApplication(application(parcelId, offset), { from: owner });
   const appId = Number(await sys.titles.applicationCount());
-  await sys.titles.approveSurvey(appId, { from: sys.surveyor });
-  await sys.titles.approveLegal(appId, { from: sys.lawyer });
-  await sys.titles.finalise(appId, { from: sys.registrar });
+  await payRegistrationFees(sys, Number(await sys.titles.recordOfParcelId(parcelId)));
+  await sys.titles.approveApplication(appId, { from: sys.registrar });
   return Number(await sys.titles.recordOfParcelId(parcelId));
 }
 
@@ -67,6 +70,8 @@ async function expectRevert(promise, message) {
   assert.fail(`Expected revert "${message}" but the call succeeded`);
 }
 
-const cedis = (n) => web3.utils.toWei(String(n), "ether");
+// Status enums as web3 returns them (strings).
+const STATUS = { Pending: "0", Registered: "1", TransferPending: "2", Rejected: "3" };
+const DECISION = { Waiting: "0", Approved: "1", Rejected: "2", Cancelled: "3" };
 
-module.exports = { deploySystem, verifiedCitizen, application, titledParcel, expectRevert, cedis, cardHash, square };
+module.exports = { deploySystem, verifiedCitizen, application, titledParcel, payRegistrationFees, receipt, FEE, expectRevert, cardHash, square, STATUS, DECISION };

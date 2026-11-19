@@ -1,129 +1,191 @@
 # LandChain Ghana: smart contracts
 
-A blockchain land-titling system for the Lands Commission of Ghana. Every registered parcel is an ERC-721 title
-linked to its GPS boundary. Registration needs surveyor, lawyer and registrar sign-off, in that order. Sales settle
-through escrow in test cedis (tGHS) and need the registrar's approval; a buyer or seller can take an escrowed sale to a
-judge instead.
+A blockchain land register for the Lands Commission of Ghana. The sale of land still happens off chain (indenture,
+lawyer, family or stool). LandChain records the **result** so that nobody can quietly change it afterwards:
 
-The contracts were designed to fit the web app ([landchain-web](https://github.com/ProjectBlockchainFall26/landchain-web)):
-same contract names, same functions, same error messages. The web app reads and writes them directly.
+1. **Identity.** A person links their wallet to a Ghana Card. Only a hash of the card goes on chain. An identity
+   officer verifies it.
+2. **Register.** The verified owner applies with the parcel ID, the regional plan number, the GhanaPostGPS address,
+   the GPS boundary and the SHA-256 fingerprints of the site plan, indenture and search report.
+3. **Fees.** The owner pays the official fees in cedis as usual. The registrar records each receipt in `FeeLedger`
+   (amount + hash of the receipt number). A receipt can't be recorded twice.
+4. **Approve.** The Lands Commission registrar approves. The contract refuses until the stamp duty and registration
+   fee are recorded, then mints the title as an **ERC-721 NFT** to the owner and the record is locked.
+5. **Transfer.** To record a new owner, the owner requests a transfer, the registrar records the transfer fee and
+   approves it. Neither can move a title alone. Every owner is kept on chain in `ownerHistory`.
+6. **Verify.** Anyone can read any title, its boundary and its full history for free.
 
 Toolchain, same as the course: **Truffle 5, Solidity 0.8.20 (EVM paris), OpenZeppelin 5.0.2, Ganache, web3.js v4.**
 
-## Quick start (local chain)
+## Run the whole project
 
-```bash
-npm install
-npm run chain          # terminal 1: Ganache on 127.0.0.1:7545, chain id 1337. Leave it running.
-npm run setup:local    # terminal 2: deploy the 6 contracts, wire roles, seed the demo world
+You need **Node.js 20+** and both repos cloned **side by side** in one folder:
+
+```
+ProjectBlockchain/
+├─ landchain-contracts/
+└─ landchain-web-main/     (the landchain-web repo)
 ```
 
-Then in the web app folder: `npm run contracts:sync` (copies ABIs + addresses) and `npm run dev`.
+The project runs in **three terminals**: the blockchain, the setup, and the web app.
 
-`npm run chain` keeps its data in `.ganache-db/`, so stopping and restarting it keeps your parcels. To start over,
-delete `.ganache-db/` (or use `npm run chain:fresh`, which keeps nothing), then run `npm run setup:local` again and
-`npm run contracts:sync` in the web app.
+### First time only
+
+```bash
+cd landchain-contracts && npm install
+cd ../landchain-web-main && npm install
+```
+
+### Start everything from scratch (recommended before a demo)
+
+```bash
+# terminal 1, in landchain-contracts: stop any running chain (Ctrl+C), then
+npm run chain:fresh          # empty local blockchain on 127.0.0.1:7545. Leave this running.
+
+# terminal 2, in landchain-contracts (wait until terminal 1 says "RPC Listening on 127.0.0.1:7545")
+npm run setup:local          # deploy the 4 contracts + seed the demo data. Wait for "Seeded."
+
+# terminal 2 again, in landchain-web-main (only after "Seeded.")
+npm run contracts:sync       # copy the new contract addresses and ABIs into the web app
+
+# terminal 3, in landchain-web-main
+npm run dev                  # open the URL it prints, usually http://localhost:5173
+```
+
+The two middle steps can be one command: `npm run setup:all` in `landchain-contracts` runs `setup:local`, then
+`contracts:sync` in the web app, in the right order.
+
+Then hard-refresh the browser (**Cmd+Shift+R**) and pick a demo account on the login page. No wallet is needed on
+the local chain.
+
+### Which chain command?
+
+| Command | What happens when you stop it |
+|---|---|
+| `npm run chain:fresh` | Everything is lost. Run `setup:local` + `contracts:sync` again after every restart. Best for demos: a clean start every time. |
+| `npm run chain` | Saved in `landchain-contracts/.ganache-db/`. Next time, just run `npm run chain` and `npm run dev`; no setup needed. |
+
+### When to run setup again
+
+- After `chain:fresh` (every time).
+- After changing any contract in `contracts/`.
+- After pulling contract changes from GitHub.
+- When the app says "This chain doesn't have the current LandChain contracts".
+
+### Troubleshooting
+
+| You see | Do this |
+|---|---|
+| "Can't reach http://127.0.0.1:7545. Is the chain running?" | Start terminal 1 (`npm run chain:fresh` or `npm run chain`). |
+| "This chain doesn't have the current LandChain contracts" / "No demo accounts found" | The web app has old addresses. Run `npm run setup:all` in `landchain-contracts`, then Cmd+Shift+R. |
+| `contracts:sync` says "Synced 3 ABIs" | You synced before setup finished. Run `contracts:sync` again (it should say 4 ABIs). |
+| "This version of µWS is not compatible with your Node.js build" | Harmless warning from Ganache on newer Node. Ignore it, or use Node 20. |
+| Port 7545 already in use | Another chain is running (maybe the Ganache desktop app). Close it, or `lsof -i :7545` and stop that process. |
+| MetaMask errors after a fresh chain | MetaMask → Settings → Advanced → Clear activity tab data. Network: RPC `http://127.0.0.1:7545`, chain ID `1337`. |
+
+### Tests
+
+```bash
+# landchain-contracts, with a chain running
+npm run contracts:test       # 25 Truffle tests
+
+# landchain-web-main, with the seeded chain running
+npm run test:e2e             # 5 end-to-end tests through the app's own functions
+```
+
+Running `contracts:test` doesn't touch your saved addresses. Running `setup:local` on a different chain does:
+run `setup:all` on your own chain afterwards.
+
+### Scripts
 
 | Script | What it does |
 |---|---|
 | `npm run contracts:compile` | Compile and write `shared/abi/*.json` |
-| `npm run contracts:test` | 24 tests, one file per flow (needs `npm run chain` running) |
+| `npm run contracts:test` | 25 tests: identity, registration, tamper-proof ownership, transfers and fee receipts (needs `npm run chain` running) |
 | `npm run deploy:local` | Deploy to Ganache and record addresses in `shared/deployments.local.json` |
-| `npm run seed:local` | Create the demo parcels, sales and dispute with real transactions |
-| `npm run deploy:sepolia` | Deploy to Sepolia (see below) |
-
-The compiler is the pinned `solc` 0.8.20 from `node_modules`, so nothing is downloaded at compile time.
+| `npm run seed:local` | Create the demo identities, parcels and transfers with real transactions |
+| `npm run deploy:sepolia` | Deploy to Sepolia |
 
 ## Demo accounts (local chain)
-
-Ganache's deterministic accounts. Names live only in `shared/demo-accounts.local.json`, never on chain.
 
 | # | Name | Role |
 |---|---|---|
 | 0 | Lands Commission | Registrar + admin (deployer) |
-| 1 | Kwame Asante | Surveyor |
-| 2 | Esi Quaye, Esq. | Lawyer |
-| 3 | Abena Sarpong | Identity officer |
-| 4 | Justice Ansah | Judge |
-| 5 | Ama Owusu | Citizen, verified |
-| 6 | Yaw Boakye | Citizen, verified |
-| 7 | Kofi Mensah | Citizen, verified |
-| 8 | Akosua Darko | Non-citizen, verified |
-| 9 | Kwabena Ofori | Citizen, identity pending |
-| 10 | Efua Mensah | Citizen, no profile yet |
+| 1 | Abena Sarpong | Identity officer |
+| 2–5 | Ama Owusu, Yaw Boakye, Kofi Mensah, Akosua Darko | Verified (Akosua non-citizen) |
+| 6 | Kwabena Ofori | Identity pending |
+| 7 | Efua Mensah | No profile yet (use her to demo the flow from scratch) |
 
-The seed creates 14 parcels around Berekuso: titled, for sale, in escrow (GA-BRK-0012), sold, frozen by a judge
-(GA-BRK-0011), disputed (GA-BRK-0006) and pending at different steps (GA-BRK-0013, GA-BRK-0014).
+Seed: 14 parcels around Berekuso, each with a plan number, GPS address, three document fingerprints and recorded
+fees (search, stamp duty on an illustrative GH¢ 60,000/acre, registration, and transfer where relevant). 10 registered, GA-BRK-0001 and GA-BRK-0008 already transferred once,
+GA-BRK-0006 with a transfer waiting for the registrar, GA-BRK-0013 and GA-BRK-0014 waiting for registration.
 
 ## Architecture
 
 ```
-                  LandAccessControl  (one role hub: admin, registrar, surveyor, lawyer, ID officer, judge, agent)
-                          ▲  every contract inherits LandRoleGuard and asks the hub "does X hold role Y?"
-     ┌────────────────┬───┴──────────────┬─────────────────────┬─────────────────────┐
-IdentityRegistry   TitleRegistry ◄──── Marketplace ◄────── DisputeResolution      TestCedi (tGHS)
- (who is who)      ERC-721 titles      list, escrow,        disputes, judge's       faucet, pays
-                   apply → 3 sign-offs  registrar approves   ruling, freeze          for sales
-                   → mint               (AGENT)              (AGENT)
+            LandAccessControl  (one role hub: admin, REGISTRAR_ROLE, ID_OFFICER_ROLE)
+                    ▲  each contract inherits LandRoleGuard and asks the hub "does X hold role Y?"
+          ┌─────────┴──────────┬───────────────────────┐
+  IdentityRegistry ◄──── TitleRegistry (ERC-721 "GLT") ◄──► FeeLedger
+   who is who:            apply → registrar approves → mint     registrar records official receipts;
+   card hash, verified?   request → registrar approves → move   TitleRegistry won't approve without them
 ```
-
-Only the two **agent** contracts (Marketplace, DisputeResolution) may change a title's status or owner.
 
 | Contract | Key functions |
 |---|---|
 | `LandAccessControl` | `grantRole`, `revokeRole`, `rolesOf`, `isOfficer` |
 | `IdentityRegistry` | `submitProfile(cardHash, citizen)`, `verifyProfile`, `rejectProfile`, `profileOf`, `isVerified`, `members`, `publicIdOf` |
-| `TitleRegistry` | `submitApplication(tuple)`, `approveSurvey`, `approveLegal`, `finalise`, `rejectApplication`, `getParcel`, `getBoundary`, `getDocs`, `getApplication`, `currentStep`, `recordOfParcelId`; agent-only `setStatus`, `agentTransfer` |
-| `Marketplace` | `listForSale`, `cancelListing`, `buyListed`, `approveSale`, `rejectSale`, `listingOf`, `getSale`; agent-only `markDisputed`, `settleDispute` |
-| `DisputeResolution` | `raiseDispute`, `resolveDispute`, `freezeTitle`, `unfreezeTitle`, `getDispute` |
-| `TestCedi` | `faucet` (1,000,000 tGHS per hour), standard ERC-20, admin `mint` for seeding |
+| `FeeLedger` | `recordPayment(recordId, kind, amountPesewas, receiptHash)`, `isPaid`, `transferFeePaid`, `getPayment`, `paymentsOf` |
+| `TitleRegistry` | `setFeeLedger`, `submitApplication(tuple)`, `approveApplication`, `rejectApplication`, `requestTransfer`, `cancelTransfer`, `approveTransfer`, `rejectTransfer`, `getParcel`, `getBoundary`, `getDocs`, `ownerHistory`, `getApplication`, `getTransfer`, `recordOfParcelId` |
 
-Every state change emits an event. The web app builds each parcel's history, the activity log and notifications from
-these events; later the backend's event-sync job will index the same events into Postgres.
+### Events (the audit trail)
+
+`ProfileSubmitted`, `ProfileVerified`, `ProfileRejected`, `ApplicationSubmitted`, `ApplicationApproved`,
+`ApplicationRejected`, `TitleMinted`, `PaymentRecorded`, `TransferRequested`, `TransferApproved`, `TransferRejected`, `TransferCancelled`,
+plus the standard ERC-721 `Transfer`. The web app builds every title's history and the activity log from these.
 
 ### How the front end uses them
 
-| Screen action | Contract call(s) |
+| Screen action | Contract call |
 |---|---|
 | Identity: submit Ghana Card | `IdentityRegistry.submitProfile(keccak256("landchain-card:" + card), citizen)` |
 | Review queue: verify identity | `IdentityRegistry.verifyProfile(address)` |
-| Register Land: submit | `TitleRegistry.submitApplication({parcelId, interest, holder, region, location, acresX100, lats, lngs, docs})` |
-| Review queue: survey / legal / registrar | `approveSurvey(appId)`, `approveLegal(appId)`, `finalise(appId)` (mints the NFT) |
-| List for sale | `Marketplace.listForSale(recordId, price)` |
-| Buy | `TestCedi.approve(Marketplace, price)` then `Marketplace.buyListed(recordId)` |
-| Registrar approves / rejects | `Marketplace.approveSale(saleId)` / `rejectSale(saleId)` |
-| Raise dispute / judge rules | `DisputeResolution.raiseDispute(saleId, reason, evidenceHash)` / `resolveDispute(id, favourSeller)` |
-| My Balance: faucet | `TestCedi.faucet()` |
+| Register Land | `TitleRegistry.submitApplication({parcelId, interest, holder, region, location, planNumber, gpsAddress, acresX100, lats, lngs, docs: [{docType, hash}]})` |
+| Review queue: record a fee receipt | `FeeLedger.recordPayment(recordId, kind, amountPesewas, keccak256(receiptNo))` |
+| Review queue: approve registration | `TitleRegistry.approveApplication(appId)` (mints the NFT) |
+| Title record: transfer ownership | `TitleRegistry.requestTransfer(recordId, newOwner)` |
+| Review queue: approve transfer | `TitleRegistry.approveTransfer(transferId)` (moves the NFT) |
 
 ### Design decisions worth defending in the review
 
-- **Titles cannot be moved with `transferFrom`.** `TitleRegistry._update` refuses any transfer that has a caller
-  (`auth != 0`). Mints and `agentTransfer` pass no caller, so every ownership change goes through a registrar-approved
-  sale or a judge's ruling.
-- **Pending ≠ minted.** An application creates a record (with an owner, boundary and documents) but no token. The
-  ERC-721 is minted only when the registrar finalises, after surveyor and lawyer.
-- **One active record per parcel id and per boundary** (keccak of the id / of the polygon). A rejection frees both so
-  a corrected application can be made.
-- **Coordinates are integers in micro-degrees** (5.603717 → 5603717), bounded to Ghana's box. Overlap between
-  *different* polygons is checked in the web app before submitting, and will move to PostGIS on the backend; doing it
-  on chain would cost gas per existing parcel.
-- **Area** is computed off chain and stored in hundredths of an acre; the surveyor's sign-off attests it.
-- **Privacy:** no names or Ghana Card numbers on chain, only the card's hash and a pseudonymous public ID
-  (`GH-` + first 4 bytes of keccak256(address)).
-- **Escrow is real money flow:** the buyer's tGHS sits in the Marketplace contract until the registrar or a judge
-  releases it. `nonReentrant` guards every function that moves tokens.
-- **Readable errors:** every `require` message is the sentence the UI shows, e.g. *"Only the surveyor can sign this
-  step"*, *"Steps must happen in order: survey → legal → registrar"*.
+- **Tamper-proof ownership.** `_update` refuses any transfer that has a caller, so `transferFrom` and
+  `safeTransferFrom` always revert, even for the owner. Only the contract's own `_mint` and `_transfer` (inside
+  `approveTransfer`) can move a title.
+- **Two keys to move a title.** The owner must request the transfer and the registrar must approve it. The registrar
+  can't take a title the owner never offered, and the owner can't skip the Lands Commission.
+- **Pending ≠ minted.** An application is a record with no token; the ERC-721 is minted only on approval.
+- **One active record per parcel ID and per boundary.** Rejection frees both for a corrected application.
+- **Coordinates in micro-degrees**, bounded to Ghana's box (Solidity has no decimals). Overlap between different
+  polygons is checked in the web app before submitting.
+- **Privacy: the chain is public.** Anything in a contract (even `private` variables) can be read by anyone running a
+  node. So only a card hash, a pseudonymous public ID (`GH-` + 4 bytes of keccak256(address)), document *types and
+  fingerprints* and receipt-number hashes go on chain. Names, files (and their file names), Ghana Card numbers and
+  enquiry messages stay off chain with the Lands Commission. Anyone holding a copy of a document can prove it is the
+  registered version by hashing it.
+- **Fees on chain, money off chain.** Fees are paid in cedis outside the system; the registrar records each official
+  receipt. Receipt numbers are hashed and can't be reused, and approval is blocked until the required fees exist.
+  `FeeLedger` is a separate contract because `TitleRegistry` is close to Ethereum's 24 KB contract size limit.
+- **Readable errors:** every `require` message is the sentence the UI shows.
 
-## Deploy to Sepolia
+## Assumptions
 
-Copy `.env.local.example` to `.env.local`, put a **throwaway** test wallet's key in `TESTNET_PRIVATE_KEY`, an RPC URL in
-`SEPOLIA_RPC_URL`, and the officer addresses you want (they default to the deployer). Then `npm run deploy:sepolia`.
-Addresses are recorded in `shared/deployments.json` (commit this file). In the web app set `VITE_CHAIN_ID=11155111`
-and run `npm run contracts:sync`.
+See the web app's **Assumptions** page (and `masterplan.md`). In short: the sale happens off the platform; the Lands
+Commission is trusted when it enters a record (the chain stops later tampering, not a forgery that was approved);
+physical and legal checks happen off chain; wallet = identity; no personal data on chain; fees paid in cedis off
+chain; whole parcels only; courts decide disputes outside the system; one trusted registrar key; test network only.
 
 ## Not in this milestone
 
-Leases and ground rent, succession, fractional ownership, IPFS/Supabase storage for documents, the backend's event
-indexer and backend-signed officer actions. Not audited: run Slither and a peer review before anything beyond a
-testnet.
+On-platform payments and escrow, disputes and court orders, leases and ground rent, succession, IPFS document storage,
+the backend event indexer and backend-signed officer actions. Not audited: run Slither and a peer review before
+anything beyond a testnet.

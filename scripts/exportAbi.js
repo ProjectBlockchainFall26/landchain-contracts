@@ -2,7 +2,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const NAMES = ["LandAccessControl", "IdentityRegistry", "TestCedi", "TitleRegistry", "Marketplace", "DisputeResolution"];
+const NAMES = ["LandAccessControl", "IdentityRegistry", "TitleRegistry", "FeeLedger"];
 const out = path.join(__dirname, "..", "shared", "abi");
 fs.mkdirSync(out, { recursive: true });
 for (const name of NAMES) {

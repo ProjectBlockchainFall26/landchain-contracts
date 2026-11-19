@@ -1,7 +1,7 @@
 const { deploySystem, expectRevert, cardHash } = require("./helpers/setup");
 
 contract("IdentityRegistry", (accounts) => {
-  const ama = accounts[5], kofi = accounts[6];
+  const ama = accounts[2], kofi = accounts[3];
   let sys;
   beforeEach(async () => { sys = await deploySystem(accounts); });
 
@@ -25,7 +25,7 @@ contract("IdentityRegistry", (accounts) => {
   });
 
   it("officers cannot submit a citizen profile", async () => {
-    await expectRevert(sys.identity.submitProfile(cardHash(1), true, { from: sys.surveyor }), "Only citizens can submit a profile");
+    await expectRevert(sys.identity.submitProfile(cardHash(1), true, { from: sys.registrar }), "Only citizens can submit a profile");
   });
 
   it("a rejected person can resubmit with the same card", async () => {

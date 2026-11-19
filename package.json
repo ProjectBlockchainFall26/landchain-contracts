@@ -2,7 +2,7 @@
   "name": "landchain-contracts",
   "version": "1.0.0",
   "private": true,
-  "description": "LandChain Ghana smart contracts: identity, ERC-721 land titles with surveyor/lawyer/registrar sign-off, escrow marketplace, disputes and a test cedi.",
+  "description": "LandChain Ghana smart contracts: Ghana Card identity, ERC-721 land titles approved by the Lands Commission registrar, and registrar-approved ownership transfers.",
   "scripts": {
     "chain": "ganache --port 7545 --chain.networkId 5777 --chain.chainId 1337 --wallet.deterministic --wallet.totalAccounts 12 --wallet.defaultBalance 1000 --database.dbPath .ganache-db",
     "chain:fresh": "ganache --port 7545 --chain.networkId 5777 --chain.chainId 1337 --wallet.deterministic --wallet.totalAccounts 12 --wallet.defaultBalance 1000",
@@ -11,6 +11,7 @@
     "deploy:local": "truffle migrate --network development --reset && node scripts/exportAbi.js",
     "seed:local": "truffle exec scripts/seed.js --network development",
     "setup:local": "npm run deploy:local && npm run seed:local",
+    "setup:all": "npm run setup:local && cd ../landchain-web-main && npm run contracts:sync",
     "deploy:sepolia": "truffle migrate --network sepolia --reset && node scripts/exportAbi.js"
   },
   "devDependencies": {

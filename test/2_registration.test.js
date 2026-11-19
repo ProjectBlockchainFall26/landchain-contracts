@@ -1,7 +1,7 @@
-const { deploySystem, verifiedCitizen, application, expectRevert } = require("./helpers/setup");
+const { deploySystem, verifiedCitizen, application, payRegistrationFees, expectRevert, STATUS, DECISION } = require("./helpers/setup");
 
 contract("TitleRegistry: registration", (accounts) => {
-  const ama = accounts[5], kofi = accounts[6];
+  const ama = accounts[2], kofi = accounts[3];
   let sys;
   beforeEach(async () => {
     sys = await deploySystem(accounts);
@@ -15,30 +15,40 @@ contract("TitleRegistry: registration", (accounts) => {
   it("a pending application has a record but no token", async () => {
     await sys.titles.submitApplication(application("GA-BRK-0015"), { from: ama });
     const p = await sys.titles.getParcel(1);
-    assert.equal(p.status, "0");
+    assert.equal(p.status, STATUS.Pending);
     assert.equal(p.tokenId, "0");
     assert.equal(p.owner, ama);
     assert.equal((await sys.titles.totalSupply()).toString(), "0");
   });
 
-  it("steps go survey -> legal -> registrar, each by its own role, then the title is minted", async () => {
+  it("only the registrar can approve; approval mints the title NFT to the owner", async () => {
     await sys.titles.submitApplication(application("GA-BRK-0015"), { from: ama });
-    await expectRevert(sys.titles.approveLegal(1, { from: sys.lawyer }), "Steps must happen in order");
-    await expectRevert(sys.titles.approveSurvey(1, { from: sys.lawyer }), "Only the surveyor can sign this step");
-    await sys.titles.approveSurvey(1, { from: sys.surveyor });
-    await sys.titles.approveLegal(1, { from: sys.lawyer });
-    await expectRevert(sys.titles.finalise(1, { from: sys.lawyer }), "Only the registrar can sign this step");
-    const tx = await sys.titles.finalise(1, { from: sys.registrar });
+    await expectRevert(sys.titles.approveApplication(1, { from: ama }), "Only the registrar can approve a registration");
+    await expectRevert(sys.titles.approveApplication(1, { from: sys.idOfficer }), "Only the registrar can approve a registration");
+    await payRegistrationFees(sys, 1);
+    const tx = await sys.titles.approveApplication(1, { from: sys.registrar });
     assert.equal(tx.logs.find((l) => l.event === "TitleMinted").args.tokenId.toString(), "1");
     assert.equal(await sys.titles.ownerOf(1), ama);
-    assert.equal((await sys.titles.getParcel(1)).status, "1");
+    const p = await sys.titles.getParcel(1);
+    assert.equal(p.status, STATUS.Registered);
+    assert.notEqual(p.registeredAt, "0");
+    assert.deepEqual(await sys.titles.ownerHistory(1), [ama]);
+    assert.equal((await sys.titles.getApplication(1)).decision, DECISION.Approved);
+  });
+
+  it("an application can only be decided once", async () => {
+    await sys.titles.submitApplication(application("GA-BRK-0015"), { from: ama });
+    await payRegistrationFees(sys, 1);
+    await sys.titles.approveApplication(1, { from: sys.registrar });
+    await expectRevert(sys.titles.approveApplication(1, { from: sys.registrar }), "already been decided");
+    await expectRevert(sys.titles.rejectApplication(1, "Changed my mind", { from: sys.registrar }), "already been decided");
   });
 
   it("rejecting needs a reason and frees the parcel id for a corrected application", async () => {
     await sys.titles.submitApplication(application("GA-BRK-0015"), { from: ama });
-    await expectRevert(sys.titles.rejectApplication(1, 0, "", { from: sys.surveyor }), "A reason is required to reject");
-    await sys.titles.rejectApplication(1, 0, "Pillars missing", { from: sys.surveyor });
-    assert.equal((await sys.titles.getParcel(1)).status, "6");
+    await expectRevert(sys.titles.rejectApplication(1, "", { from: sys.registrar }), "A reason is required to reject");
+    await sys.titles.rejectApplication(1, "Site plan does not match the pillars", { from: sys.registrar });
+    assert.equal((await sys.titles.getParcel(1)).status, STATUS.Rejected);
     await sys.titles.submitApplication(application("GA-BRK-0015"), { from: ama });
     assert.equal((await sys.titles.recordOfParcelId("GA-BRK-0015")).toString(), "2");
   });
@@ -57,6 +67,12 @@ contract("TitleRegistry: registration", (accounts) => {
     await expectRevert(sys.titles.submitApplication(two, { from: ama }), "A boundary needs at least 3 corner pillars");
   });
 
+  it("needs the plan number from the site plan", async () => {
+    const app = application("GA-BRK-0015");
+    app.planNumber = "";
+    await expectRevert(sys.titles.submitApplication(app, { from: ama }), "Add the regional plan number from the site plan");
+  });
+
   it("stores the boundary and document hashes", async () => {
     const app = application("GA-BRK-0015");
     await sys.titles.submitApplication(app, { from: ama });
@@ -64,5 +80,7 @@ contract("TitleRegistry: registration", (accounts) => {
     assert.deepEqual(b.lats.map(String), app.lats.map(String));
     const docs = await sys.titles.getDocs(1);
     assert.equal(docs[0].hash, app.docs[0].hash);
+    assert.equal(docs[0].docType, "Indenture");
+    assert.equal((await sys.titles.getParcel(1)).planNumber, app.planNumber);
   });
 });
