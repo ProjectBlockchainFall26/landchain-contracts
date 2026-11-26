@@ -26,7 +26,9 @@ module.exports = async function (deployer, network, accounts) {
   const local = network === "development" || network === "test";
   const pick = (envKey, i) => (local ? accounts[i] : process.env[envKey] || admin);
   await acl.grantRole(await acl.REGISTRAR_ROLE(), pick("REGISTRAR", 0));
-  await acl.grantRole(await acl.ID_OFFICER_ROLE(), pick("ID_OFFICER", 1));
+  // Locally one Lands Commission wallet holds both roles: it checks Ghana Cards and approves land. The contract
+  // still keeps the roles apart, so on a testnet they can be different people (ID_OFFICER in .env.local).
+  await acl.grantRole(await acl.ID_OFFICER_ROLE(), pick("ID_OFFICER", 0));
 
   // `truffle test` re-runs migrations on the dev chain; don't overwrite the addresses the web app uses.
   const runningTests = network === "test" || process.argv.slice(2).includes("test");
