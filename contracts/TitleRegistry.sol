@@ -13,6 +13,11 @@ interface IFeeLedger {
     function transferFeePaid(uint256 transferId) external view returns (bool);
 }
 
+/// @notice What TitleRegistry needs to know from the EncumbranceRegistry: is a mortgage, lien, caveat or court order active?
+interface IEncumbrances {
+    function blockingCount(uint256 recordId) external view returns (uint256);
+}
+
 /// @title TitleRegistry
 /// @notice The land register. A verified owner applies to register a parcel (with its GPS boundary and
 ///         document hashes); the Lands Commission registrar approves it and an ERC-721 title is minted
@@ -108,6 +113,7 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
 
     IdentityRegistry public immutable identity;
     IFeeLedger public feeLedger; // set once by the admin after both contracts are deployed
+    IEncumbrances public encumbrances; // optional: when set, active encumbrances block transfers
 
     // FeeLedger kinds this contract checks (must match FeeLedger.Kind).
     uint8 private constant FEE_STAMP_DUTY = 1;
@@ -151,6 +157,15 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     {
         require(address(feeLedger) == address(0), "Fee ledger already set");
         feeLedger = ledger;
+    }
+
+    /// @notice Connects the encumbrance registry. Once set, an active mortgage, lien, caveat or court order blocks transfers.
+    function setEncumbranceRegistry(IEncumbrances registry)
+        external
+        onlyLandRole(acl.DEFAULT_ADMIN_ROLE(), "Only the admin can connect the encumbrance registry")
+    {
+        require(address(encumbrances) == address(0), "Encumbrance registry already set");
+        encumbrances = registry;
     }
 
     // ---------- 1. registration ----------
@@ -267,6 +282,7 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
         require(p.status == Status.Registered, "Only a registered title with no pending transfer can be transferred");
         require(to != msg.sender, "You already own this title");
         require(identity.isVerified(to), "The new owner must have a verified identity");
+        _requireUnencumbered(recordId);
 
         _transfers.push(
             TransferRequest({
@@ -304,6 +320,7 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     {
         TransferRequest storage t = _openTransfer(transferId);
         require(identity.isVerified(t.to), "The new owner must have a verified identity");
+        _requireUnencumbered(t.recordId);
         if (address(feeLedger) != address(0)) {
             require(feeLedger.transferFeePaid(transferId), "Record the transfer fee before approving");
         }
@@ -382,6 +399,15 @@ contract TitleRegistry is ERC721Enumerable, LandRoleGuard {
     }
 
     // ---------- internals ----------
+
+    function _requireUnencumbered(uint256 recordId) private view {
+        if (address(encumbrances) != address(0)) {
+            require(
+                encumbrances.blockingCount(recordId) == 0,
+                "This title has an active mortgage, lien, caveat or court order. It must be released before a transfer"
+            );
+        }
+    }
 
     function _openApp(uint256 appId) private view returns (Application storage a) {
         a = _app(appId);

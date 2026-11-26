@@ -10,6 +10,7 @@ const path = require("path");
 const IdentityRegistry = artifacts.require("IdentityRegistry");
 const TitleRegistry = artifacts.require("TitleRegistry");
 const FeeLedger = artifacts.require("FeeLedger");
+const EncumbranceRegistry = artifacts.require("EncumbranceRegistry");
 const F = require("./fees");
 
 // ---- geometry (same as the web app's geo.ts) ----
@@ -112,6 +113,16 @@ module.exports = async function (callback) {
       const extra = status === "transferred" ? `, transferred to ${label.get(to)}`
         : status === "transfer_pending" ? `, transfer to ${label.get(to)} waiting for the registrar` : "";
       log(`${id} registered to ${label.get(owner)}${extra}`);
+    }
+
+    // One mortgaged title, so the demo can show that an encumbrance blocks a sale.
+    const encumbrances = await EncumbranceRegistry.deployed();
+    const mortgaged = Number(await titles.recordOfParcelId("GA-BRK-0005"));
+    if (mortgaged) {
+      const owner = (await titles.getParcel(mortgaged)).owner;
+      await encumbrances.registerEncumbrance(mortgaged, 0, "Mortgage deed GCB/MTG/2026/0041",
+        web3.utils.soliditySha3("GA-BRK-0005 mortgage deed"), { from: REGISTRAR });
+      log(`GA-BRK-0005 (${label.get(owner)}) mortgaged to a bank: transfers are blocked until it is released`);
     }
 
     const file = path.join(__dirname, "..", "shared", "demo-accounts.local.json");

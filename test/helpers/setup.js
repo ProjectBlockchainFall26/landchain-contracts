@@ -3,6 +3,7 @@ const LandAccessControl = artifacts.require("LandAccessControl");
 const IdentityRegistry = artifacts.require("IdentityRegistry");
 const TitleRegistry = artifacts.require("TitleRegistry");
 const FeeLedger = artifacts.require("FeeLedger");
+const EncumbranceRegistry = artifacts.require("EncumbranceRegistry");
 
 async function deploySystem(accounts) {
   const [registrar, idOfficer] = accounts;
@@ -11,9 +12,11 @@ async function deploySystem(accounts) {
   const titles = await TitleRegistry.new(acl.address, identity.address);
   const fees = await FeeLedger.new(acl.address, titles.address);
   await titles.setFeeLedger(fees.address, { from: registrar });
+  const encumbrances = await EncumbranceRegistry.new(acl.address, titles.address);
+  await titles.setEncumbranceRegistry(encumbrances.address, { from: registrar });
   await acl.grantRole(await acl.REGISTRAR_ROLE(), registrar);
   await acl.grantRole(await acl.ID_OFFICER_ROLE(), idOfficer);
-  return { acl, identity, titles, fees, registrar, idOfficer };
+  return { acl, identity, titles, fees, encumbrances, registrar, idOfficer };
 }
 
 const cardHash = (n) => web3.utils.soliditySha3(`landchain-card:GHA-70000000${n}-${n}`);
@@ -73,5 +76,6 @@ async function expectRevert(promise, message) {
 // Status enums as web3 returns them (strings).
 const STATUS = { Pending: "0", Registered: "1", TransferPending: "2", Rejected: "3" };
 const DECISION = { Waiting: "0", Approved: "1", Rejected: "2", Cancelled: "3" };
+const ENCUMBRANCE = { Mortgage: 0, Lien: 1, Caveat: 2, CourtOrder: 3, Lease: 4 };
 
-module.exports = { deploySystem, verifiedCitizen, application, titledParcel, payRegistrationFees, receipt, FEE, expectRevert, cardHash, square, STATUS, DECISION };
+module.exports = { deploySystem, verifiedCitizen, application, titledParcel, payRegistrationFees, receipt, FEE, expectRevert, cardHash, square, STATUS, DECISION, ENCUMBRANCE };

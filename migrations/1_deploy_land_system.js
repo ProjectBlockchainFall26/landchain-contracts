@@ -1,9 +1,10 @@
-// Deploys the four LandChain contracts, connects the fee ledger, grants the Lands Commission roles and records the addresses for
+// Deploys the five LandChain contracts, connects the fee ledger and the encumbrance registry, grants the Lands Commission roles and records the addresses for
 // the front end (shared/deployments*.json).
 const LandAccessControl = artifacts.require("LandAccessControl");
 const IdentityRegistry = artifacts.require("IdentityRegistry");
 const TitleRegistry = artifacts.require("TitleRegistry");
 const FeeLedger = artifacts.require("FeeLedger");
+const EncumbranceRegistry = artifacts.require("EncumbranceRegistry");
 const { recordDeployment } = require("../scripts/recordDeployment");
 
 module.exports = async function (deployer, network, accounts) {
@@ -20,6 +21,10 @@ module.exports = async function (deployer, network, accounts) {
   const fees = await FeeLedger.deployed();
   // From now on the registrar can only approve once the fee receipts are recorded.
   await titles.setFeeLedger(fees.address);
+  await deployer.deploy(EncumbranceRegistry, acl.address, titles.address);
+  const encumbrances = await EncumbranceRegistry.deployed();
+  // From now on an active mortgage, lien, caveat or court order blocks transfers.
+  await titles.setEncumbranceRegistry(encumbrances.address);
 
   // Officer roles. Local Ganache: account 0 is the registrar, account 1 the identity officer
   // (see README "Demo accounts"). Testnets: addresses from .env.local, falling back to the deployer.
@@ -37,5 +42,6 @@ module.exports = async function (deployer, network, accounts) {
     IdentityRegistry: identity.address,
     TitleRegistry: titles.address,
     FeeLedger: fees.address,
+    EncumbranceRegistry: encumbrances.address,
   });
 };
