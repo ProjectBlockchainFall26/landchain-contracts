@@ -32,9 +32,10 @@ const INTEREST = { Allodial: 0, "Customary freehold": 1, "Common-law freehold": 
 module.exports = async function (callback) {
   try {
     const accounts = await web3.eth.getAccounts();
-    const [REGISTRAR, IDO, AMA, YAW, KOFI, AKOSUA, KWABENA, EFUA] = accounts;
+    // accounts[1] is not used: the Lands Commission wallet both verifies identities and approves land.
+    const [REGISTRAR, , AMA, YAW, KOFI, AKOSUA, KWABENA, EFUA] = accounts;
     const names = [
-      [REGISTRAR, "Lands Commission"], [IDO, "Abena Sarpong"], [AMA, "Ama Owusu"], [YAW, "Yaw Boakye"],
+      [REGISTRAR, "Lands Commission"], [AMA, "Ama Owusu"], [YAW, "Yaw Boakye"],
       [KOFI, "Kofi Mensah"], [AKOSUA, "Akosua Darko"], [KWABENA, "Kwabena Ofori"], [EFUA, "Efua Mensah"],
     ];
 
@@ -57,7 +58,7 @@ module.exports = async function (callback) {
     const people = [[AMA, 1, true], [YAW, 2, true], [KOFI, 3, true], [AKOSUA, 4, false]];
     for (const [who, n, citizen] of people) {
       await identity.submitProfile(card(n), citizen, { from: who });
-      await identity.verifyProfile(who, { from: IDO });
+      await identity.verifyProfile(who, { from: REGISTRAR });
     }
     await identity.submitProfile(card(5), true, { from: KWABENA }); // left pending for the identity officer
     log("Identities: Ama, Yaw, Kofi, Akosua verified; Kwabena pending; Efua not submitted");
