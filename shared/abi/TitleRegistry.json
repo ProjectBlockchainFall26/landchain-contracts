@@ -560,6 +560,20 @@
   },
   {
     "inputs": [],
+    "name": "encumbrances",
+    "outputs": [
+      {
+        "internalType": "contract IEncumbrances",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function",
+    "constant": true
+  },
+  {
+    "inputs": [],
     "name": "feeLedger",
     "outputs": [
       {
@@ -913,6 +927,19 @@
       }
     ],
     "name": "setFeeLedger",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract IEncumbrances",
+        "name": "registry",
+        "type": "address"
+      }
+    ],
+    "name": "setEncumbranceRegistry",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
